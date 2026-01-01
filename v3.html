@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MC Texture Finder - Optimized</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        :root { --bg: #121212; --card: #1e1e1e; --accent: #3b8526; --text: #e0e0e0; }
+        body { background-color: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; padding-bottom: 50px; }
+        
+        /* コンテナ */
+        .container { max-width: 1000px; }
+        .card { background-color: var(--card); border: 1px solid #333; margin-bottom: 20px; }
+        .card-header { border-bottom: 1px solid #333; font-weight: bold; }
+        
+        /* ドラッグ&ドロップ */
+        .drop-zone { border: 2px dashed #555; border-radius: 8px; padding: 40px; text-align: center; cursor: pointer; transition: 0.2s; }
+        .drop-zone:hover { border-color: var(--accent); background: #252525; }
+
+        /* キャンバスエディタ */
+        .editor-wrapper { position: relative; background: #000; overflow: hidden; display: flex; justify-content: center; }
+        #overlayCanvas { position: absolute; top: 0; left: 0; cursor: crosshair; touch-action: none; }
+
+        /* 結果リスト */
+        .result-item { transition: transform 0.2s; border: 1px solid #444; }
+        .result-item:hover { transform: translateY(-3px); border-color: var(--accent); }
+        .preview-thumbs { display: flex; gap: 4px; overflow-x: auto; padding-top: 5px; }
+        .preview-thumbs img { width: 40px; height: 40px; object-fit: contain; background: #333; border-radius: 4px; image-rendering: pixelated; }
+
+        /* 選択リスト */
+        .selection-row { background: #2d2d2d; border-radius: 4px; padding: 8px; margin-bottom: 5px; display: flex; align-items: center; justify-content: space-between; }
+        .selection-thumb { width: 32px; height: 32px; margin-right: 10px; background: #000; object-fit: contain; }
+
+        /* ローディング */
+        #loading { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 9999; display: none; flex-direction: column; justify-content: center; align-items: center; }
+        .progress { width: 60%; height: 6px; margin-top: 10px; background: #333; }
+    </style>
+</head>
+<body>
+
+<div class="container py-4">
+    <h2 class="text-center mb-4">MC Texture Finder <span style="color:var(--accent)">AI</span></h2>
+
+    <div class="card">
+        <div class="card-header">1. スクリーンショットを選択</div>
+        <div class="card-body">
+            <div class="drop-zone" id="dropZone">
+                <p class="mb-0">ここに画像をドラッグ & ドロップ</p>
+                <input type="file" id="fileInput" accept="image/*" hidden>
+            </div>
+        </div>
+    </div>
+
+    <div class="row" id="workspace" style="display:none;">
+        <div class="col-lg-8">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>2. 範囲選択 (四隅をドラッグして変形)</span>
+                    <button class="btn btn-sm btn-primary" id="btnAdd">リストに追加</button>
+                </div>
+                <div class="card-body p-0 editor-wrapper" id="editorContainer">
+                    <canvas id="srcCanvas"></canvas>
+                    <canvas id="overlayCanvas"></canvas>
+                </div>
+                <div class="card-footer">
+                    <select class="form-select bg-dark text-white border-secondary" id="itemSelect">
+                        </select>
+                    <small class="text-muted mt-2 d-block">※ ブロックは面に合わせて四隅を指定。防具は着ている部分全体を囲ってください。</small>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-4">
+            <div class="card h-100">
+                <div class="card-header">検索対象</div>
+                <div class="card-body" id="selectionList">
+                    <p class="text-muted text-center small">まだ選択されていません</p>
+                </div>
+                <div class="card-footer">
+                    <button class="btn btn-success w-100" id="btnSearch" disabled>検索開始</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="resultArea" style="display:none;" class="mt-4">
+        <h4>検索結果</h4>
+        <div class="row g-3" id="resultGrid"></div>
+    </div>
+</div>
+
+<div id="loading">
+    <div class="spinner-border text-success" role="status"></div>
+    <div class="text-white mt-2" id="loadingText">準備中...</div>
+    <div class="progress"><div class="progress-bar bg-success" id="progressBar" style="width:0%"></div></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.0/dist/mobilenet.min.js"></script>
+
+<script>
+/**
+ * 定義: ファイルマッピング
+ * ユーザーが指定した簡易的なカテゴリ構造に対応させます。
+ */
+const MAPPING = {
+    'Blocks': {
+        'dirt': 'blocks/dirt.png',
+        'grass': 'blocks/grass.png',
+        'andesite': 'blocks/andesite.png',
+        'wool_red': 'blocks/wool_red.png',
+        'wool_blue': 'blocks/wool_blue.png',
+        'wool_yellow': 'blocks/wool_yellow.png',
+        'wool_green': 'blocks/wool_green.png',
+        'wool_orange': 'blocks/wool_orange.png',
+        'wool_light_blue': 'blocks/wool_light_blue.png',
+        'wool_gray': 'blocks/wool_gray.png',
+        'wool_magenta': 'blocks/wool_magenta.png',
+        'planks_oak': 'blocks/planks_oak.png',
+        'end_stone': 'blocks/end_stone.png',
+        'deepslate': 'blocks/deepslate.png'
+    },
+    'Items': {
+        'sword_stone': 'items/sword_stone.png',
+        'sword_iron': 'items/sword_iron.png',
+        'sword_gold': 'items/sword_gold.png',
+        'sword_diamond': 'items/sword_diamond.png',
+        'pickaxe_iron': 'items/pickaxe_iron.png',
+        'pickaxe_gold': 'items/pickaxe_gold.png',
+        'pickaxe_diamond': 'items/pickaxe_diamond.png',
+        'axe_stone': 'items/axe_stone.png',
+        'axe_iron': 'items/axe_iron.png',
+        'axe_gold': 'items/axe_gold.png',
+        'axe_diamond': 'items/axe_diamond.png',
+        'ender_pearl': 'items/ender_pearl.png',
+        'snowball': 'items/snowball.png',
+        'bow_standby': 'items/bow_standby.png',
+        'bow_pulling': 'items/bow_pulling.png'
+    },
+    'Armor (Worn)': {
+        // 防具は素材に関わらずレイヤーファイルを検索対象とする（模様判断のため）
+        // ユーザーは files/items/armor_diamond_layer_1.png 等を用意する想定だが、
+        // 検索時はファイル名の部分一致検索を行うロジックにする。
+        'helmet_chest_boots': 'items/armor_layer_1.png', 
+        'leggings': 'items/armor_layer_2.png'
+    },
+    'UI': {
+        'heart': 'ui/heart.png',
+        'hunger': 'ui/hunger.png',
+        'xp_bar': 'ui/xp_bar.png'
+    }
+};
+
+// 状態管理
+let state = {
+    net: null,
+    img: new Image(),
+    points: [], // [tl, tr, br, bl]
+    selections: [],
+    scale: 1,
+    activePt: null
+};
+
+// DOM要素
+const ui = {
+    drop: document.getElementById('dropZone'),
+    input: document.getElementById('fileInput'),
+    work: document.getElementById('workspace'),
+    sCan: document.getElementById('srcCanvas'),
+    oCan: document.getElementById('overlayCanvas'),
+    sel: document.getElementById('itemSelect'),
+    list: document.getElementById('selectionList'),
+    load: document.getElementById('loading'),
+    lTxt: document.getElementById('loadingText'),
+    bar: document.getElementById('progressBar')
+};
+
+// --- 初期化 ---
+window.onload = async () => {
+    // セレクトボックス生成
+    for(let cat in MAPPING){
+        let grp = document.createElement('optgroup'); grp.label = cat;
+        for(let key in MAPPING[cat]){
+            let opt = document.createElement('option');
+            opt.value = key; opt.text = key;
+            grp.appendChild(opt);
+        }
+        ui.sel.appendChild(grp);
+    }
+
+    // AIロード
+    ui.load.style.display = 'flex';
+    try {
+        state.net = await mobilenet.load();
+        ui.load.style.display = 'none';
+    } catch(e) { alert("AIモデルの読み込みに失敗"); }
+
+    // イベント
+    ui.drop.onclick = () => ui.input.click();
+    ui.drop.ondragover = e => { e.preventDefault(); ui.drop.style.borderColor = '#fff'; };
+    ui.drop.ondragleave = e => { e.preventDefault(); ui.drop.style.borderColor = '#555'; };
+    ui.drop.ondrop = e => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); };
+    ui.input.onchange = e => handleFile(e.target.files[0]);
+    
+    // Canvas操作
+    ui.oCan.addEventListener('mousedown', pDown);
+    ui.oCan.addEventListener('mousemove', pMove);
+    ui.oCan.addEventListener('mouseup', pUp);
+    ui.oCan.addEventListener('touchstart', pDown, {passive:false});
+    ui.oCan.addEventListener('touchmove', pMove, {passive:false});
+    ui.oCan.addEventListener('touchend', pUp);
+
+    document.getElementById('btnAdd').onclick = addSelection;
+    document.getElementById('btnSearch').onclick = startSearch;
+};
+
+function handleFile(file){
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+        state.img.src = e.target.result;
+        state.img.onload = initEditor;
+    };
+    reader.readAsDataURL(file);
+    ui.work.style.display = 'flex';
+}
+
+// --- 画像エディタ (斜め補正) ---
+function initEditor(){
+    const maxW = 800;
+    let w = state.img.width, h = state.img.height;
+    state.scale = w > maxW ? maxW / w : 1;
+    
+    w *= state.scale; h *= state.scale;
+    ui.sCan.width = ui.oCan.width = w;
+    ui.sCan.height = ui.oCan.height = h;
+    
+    const ctx = ui.sCan.getContext('2d');
+    ctx.drawImage(state.img, 0, 0, w, h);
+
+    // 初期選択範囲(中央)
+    const p = 50;
+    state.points = [{x:p, y:p}, {x:w-p, y:p}, {x:w-p, y:h-p}, {x:p, y:h-p}];
+    drawOverlay();
+}
+
+function drawOverlay(){
+    const ctx = ui.oCan.getContext('2d');
+    ctx.clearRect(0,0,ui.oCan.width, ui.oCan.height);
+    
+    ctx.beginPath();
+    state.points.forEach((p,i) => { i==0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y); });
+    ctx.closePath();
+    ctx.strokeStyle = '#0f0'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = 'rgba(0,255,0,0.2)'; ctx.fill();
+
+    state.points.forEach(p => {
+        ctx.beginPath(); ctx.arc(p.x, p.y, 6, 0, Math.PI*2);
+        ctx.fillStyle='#fff'; ctx.fill();
+    });
+}
+
+function pDown(e){
+    e.preventDefault();
+    const r = ui.oCan.getBoundingClientRect();
+    const x = (e.touches?e.touches[0].clientX:e.clientX) - r.left;
+    const y = (e.touches?e.touches[0].clientY:e.clientY) - r.top;
+    
+    // 最寄りの点を探す
+    let minD = 30; state.activePt = null;
+    state.points.forEach((p,i) => {
+        const d = Math.hypot(p.x-x, p.y-y);
+        if(d<minD){ minD=d; state.activePt=i; }
+    });
+}
+function pMove(e){
+    if(state.activePt===null) return;
+    e.preventDefault();
+    const r = ui.oCan.getBoundingClientRect();
+    state.points[state.activePt].x = (e.touches?e.touches[0].clientX:e.clientX) - r.left;
+    state.points[state.activePt].y = (e.touches?e.touches[0].clientY:e.clientY) - r.top;
+    drawOverlay();
+}
+function pUp(){ state.activePt = null; }
+
+// --- 選択処理 (Perspective Warp) ---
+async function addSelection(){
+    // 1. 座標を元画像スケールに戻す
+    const srcPts = state.points.map(p => ({x: p.x/state.scale, y: p.y/state.scale}));
+    
+    // 2. 変形処理 (64x64に正規化)
+    const size = 64;
+    const warpData = warpPerspective(state.img, srcPts, size, size);
+    
+    // Canvas作成 (AI用)
+    const cvs = document.createElement('canvas');
+    cvs.width = size; cvs.height = size;
+    const ctx = cvs.getContext('2d');
+    ctx.putImageData(warpData, 0, 0);
+
+    // 3. 特徴量抽出
+    const tensor = tf.browser.fromPixels(cvs);
+    const features = await state.net.infer(tensor, 'conv_preds');
+    const hist = calcHist(warpData);
+    
+    // カテゴリ判定 (重み付けに使用)
+    const key = ui.sel.value;
+    const cat = Object.keys(MAPPING).find(c => MAPPING[c][key]);
+
+    state.selections.push({
+        key: key,
+        category: cat,
+        features: features,
+        hist: hist,
+        thumb: cvs.toDataURL()
+    });
+    
+    // UI更新
+    renderList();
+    document.getElementById('btnSearch').disabled = false;
+    tensor.dispose();
+}
+
+function renderList(){
+    ui.list.innerHTML = '';
+    state.selections.forEach((s,i) => {
+        const div = document.createElement('div');
+        div.className = 'selection-row';
+        div.innerHTML = `<div><img src="${s.thumb}" class="selection-thumb">${s.key}</div>
+                         <button class="btn btn-sm btn-outline-danger" onclick="delSel(${i})">×</button>`;
+        ui.list.appendChild(div);
+    });
+}
+window.delSel = i => { state.selections.splice(i,1); renderList(); };
+
+// --- 検索ロジック ---
+async function startSearch(){
+    ui.load.style.display = 'flex';
+    document.getElementById('resultArea').style.display = 'none';
+    const grid = document.getElementById('resultGrid');
+    grid.innerHTML = '';
+
+    try {
+        // パックリスト取得
+        ui.lTxt.innerText = "リスト取得中...";
+        const listRes = await fetch('pack_list.txt');
+        if(!listRes.ok) throw new Error('pack_list.txt not found');
+        const packs = (await listRes.text()).split(',').map(s=>s.trim()).filter(s=>s);
+        
+        const results = [];
+        
+        for(let i=0; i<packs.length; i++){
+            const pack = packs[i];
+            ui.lTxt.innerText = `解析中: ${pack} (${i+1}/${packs.length})`;
+            ui.bar.style.width = `${((i+1)/packs.length)*100}%`;
+            
+            const score = await checkPack(pack);
+            if(score.val > 0) results.push(score);
+        }
+        
+        results.sort((a,b) => b.val - a.val);
+
+        // 結果表示
+        results.forEach(res => {
+            const div = document.createElement('div');
+            div.className = 'col-md-6 col-lg-4';
+            div.innerHTML = `
+                <div class="card p-3 result-item">
+                    <div class="d-flex justify-content-between">
+                        <h5 class="mb-0 text-truncate">${res.name}</h5>
+                        <span class="badge bg-success">${Math.round(res.val*100)}%</span>
+                    </div>
+                    <div class="preview-thumbs">
+                        ${res.imgs.map(u => `<img src="${u}">`).join('')}
+                    </div>
+                    <button class="btn btn-sm btn-light w-100 mt-2" onclick="navigator.clipboard.writeText('${res.name}')">コピー</button>
+                </div>
+            `;
+            grid.appendChild(div);
+        });
+        document.getElementById('resultArea').style.display = 'block';
+
+    } catch(e) { alert("エラー: " + e.message); }
+    finally { ui.load.style.display = 'none'; }
+}
+
+async function checkPack(packName){
+    let total = 0, count = 0, imgs = [];
+    
+    for(const sel of state.selections){
+        // パス解決
+        let targetPath = '';
+        // カテゴリからパス候補を探す
+        for(const c in MAPPING){
+            if(MAPPING[c][sel.key]) targetPath = MAPPING[c][sel.key];
+        }
+        
+        // 防具などで素材名(diamond等)を含む場合の特殊処理
+        // コード上は汎用名(armor_layer_1)だが、実ファイルは diamond_armor_layer_1 かもしれないため
+        // ここでは簡易的に指定されたパスをそのままトライする
+        
+        const url = `packs/${packName}/${targetPath}`;
+        
+        try {
+            const resp = await fetch(url);
+            if(resp.ok){
+                const blob = await resp.blob();
+                const bmp = await createImageBitmap(blob);
+                
+                // 画像処理
+                const c = document.createElement('canvas');
+                c.width = 64; c.height = 64;
+                const ctx = c.getContext('2d');
+                ctx.drawImage(bmp, 0, 0, 64, 64);
+                
+                // AI比較
+                const t = tf.browser.fromPixels(c);
+                const feat = await state.net.infer(t, 'conv_preds');
+                const sim = cosineSim(sel.features, feat);
+                
+                // 色比較
+                const hist = calcHist(ctx.getImageData(0,0,64,64));
+                const colSim = compareHist(sel.hist, hist);
+                
+                // スコア計算 (ブロックは色重視、アイテムは形状重視)
+                let score = 0;
+                if(sel.category === 'Blocks') score = sim * 0.4 + colSim * 0.6;
+                else score = sim * 0.7 + colSim * 0.3;
+                
+                total += score;
+                count++;
+                imgs.push(c.toDataURL());
+                
+                t.dispose(); feat.dispose();
+            }
+        } catch(e){}
+    }
+    return { name: packName, val: count?total/count:0, imgs: imgs };
+}
+
+// --- 数学・画像処理関数 ---
+
+// ホモグラフィ変換 (斜め補正の簡易実装)
+function warpPerspective(img, src, w, h){
+    // 変換先は(0,0) -> (w,h)の矩形
+    const dst = [{x:0,y:0}, {x:w,y:0}, {x:w,y:h}, {x:0,y:h}];
+    // 行列計算
+    const H = getHomography(src, dst);
+    const Hinv = invert3x3(H);
+    
+    // 転送用
+    const tmp = document.createElement('canvas');
+    tmp.width = img.width; tmp.height = img.height;
+    const tCtx = tmp.getContext('2d');
+    tCtx.drawImage(img,0,0);
+    const sData = tCtx.getImageData(0,0,img.width,img.height);
+    const res = new ImageData(w,h);
+    
+    for(let y=0; y<h; y++){
+        for(let x=0; x<w; x++){
+            const D = Hinv[6]*x + Hinv[7]*y + Hinv[8];
+            const u = (Hinv[0]*x + Hinv[1]*y + Hinv[2])/D;
+            const v = (Hinv[3]*x + Hinv[4]*y + Hinv[5])/D;
+            
+            const su = Math.round(u), sv = Math.round(v);
+            const idx = (y*w+x)*4;
+            if(su>=0 && su<sData.width && sv>=0 && sv<sData.height){
+                const sIdx = (sv*sData.width+su)*4;
+                res.data[idx] = sData.data[sIdx];
+                res.data[idx+1] = sData.data[sIdx+1];
+                res.data[idx+2] = sData.data[sIdx+2];
+                res.data[idx+3] = 255;
+            }
+        }
+    }
+    return res;
+}
+
+// 行列演算ヘルパー
+function getHomography(src, dst) {
+    let P = [], b = [];
+    for(let i=0; i<4; i++){
+        let s = src[i], d = dst[i];
+        P.push([-s.x, -s.y, -1, 0, 0, 0, s.x*d.x, s.y*d.x]);
+        P.push([0, 0, 0, -s.x, -s.y, -1, s.x*d.y, s.y*d.y]);
+        b.push(d.x); b.push(d.y);
+    }
+    return solve(P, b).concat([1]);
+}
+function solve(A, b) {
+    let n=8; 
+    for(let i=0;i<n;i++) A[i].push(b[i]);
+    for(let i=0;i<n;i++){
+        let max=i;
+        for(let k=i+1;k<n;k++) if(Math.abs(A[k][i]) > Math.abs(A[max][i])) max=k;
+        [A[i], A[max]] = [A[max], A[i]];
+        for(let k=i+1;k<n;k++){
+            let f = A[k][i]/A[i][i];
+            for(let j=i;j<=n;j++) A[k][j] -= A[i][j]*f;
+        }
+    }
+    let x = new Array(n);
+    for(let i=n-1;i>=0;i--){
+        let s=0; for(let j=i+1;j<n;j++) s+=A[i][j]*x[j];
+        x[i]=(A[i][n]-s)/A[i][i];
+    }
+    return x;
+}
+function invert3x3(m){
+    const [n11,n12,n13,n21,n22,n23,n31,n32,n33] = m;
+    const t11=n33*n22-n32*n23, t12=n32*n13-n33*n12, t13=n23*n12-n22*n13;
+    const det = n11*t11 + n21*t12 + n31*t13;
+    if(det===0) return m;
+    const i = 1/det;
+    return [t11*i, (n31*n23-n33*n21)*i, (n32*n21-n31*n22)*i, t12*i, (n33*n11-n31*n13)*i, (n31*n12-n32*n11)*i, t13*i, (n21*n13-n23*n11)*i, (n22*n11-n21*n12)*i];
+}
+
+// AI・色比較ヘルパー
+function cosineSim(a, b){
+    const d = tf.sum(tf.mul(a,b));
+    const nA = tf.norm(a), nB = tf.norm(b);
+    const s = tf.div(d, tf.mul(nA,nB)).dataSync()[0];
+    d.dispose(); nA.dispose(); nB.dispose();
+    return s;
+}
+function calcHist(data){
+    let h = new Array(64).fill(0), d = data.data, t=0;
+    for(let i=0; i<d.length; i+=4){
+        if(d[i+3]<128) continue;
+        const idx = (Math.floor(d[i]/64)<<4) + (Math.floor(d[i+1]/64)<<2) + Math.floor(d[i+2]/64);
+        h[idx]++; t++;
+    }
+    return h.map(v => t?v/t:0);
+}
+function compareHist(h1, h2){
+    return h1.reduce((acc, v, i) => acc + Math.min(v, h2[i]), 0);
+}
+</script>
+</body>
+</html>
