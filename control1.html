@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mcpack Texture Extractor</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body {
+            font-family: "Helvetica Neue", Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f4f4f4;
+            color: #333;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 { margin-top: 0; color: #2c3e50; }
+        .upload-area {
+            border: 2px dashed #ccc;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        .upload-area:hover { background-color: #eef; border-color: #66d; }
+        #fileInput { display: none; }
+        .btn {
+            background-color: #27ae60;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+            display: none; /* 初期は非表示 */
+            text-decoration: none;
+            text-align: center;
+        }
+        .btn:hover { background-color: #219150; }
+        #log {
+            margin-top: 20px;
+            padding: 10px;
+            background: #eee;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+        }
+        .note { font-size: 0.9em; color: #666; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Mcpack Texture Sorter</h1>
+    <p>Minecraft (.mcpack) ファイルを選択してください。指定されたカテゴリ（blocks, items, ui）に従ってファイルを抽出し、Zipでダウンロードします。</p>
+    
+    <div class="note">
+        ※ ファイル名は一般的な統合版のパス（textures/blocks/...など）に基づきます。<br>
+        ※ UI要素（ハートなど）は「icons.png」としてuiフォルダに抽出されます。
+    </div>
+
+    <div class="upload-area" onclick="document.getElementById('fileInput').click()">
+        <p>クリックしてファイルを選択 (.mcpack または .zip)</p>
+        <input type="file" id="fileInput" accept=".mcpack, .zip">
+    </div>
+
+    <div id="status">待機中...</div>
+    <div id="log"></div>
+    <a id="downloadBtn" class="btn">抽出されたファイルをダウンロード</a>
+</div>
+
+<script>
+    // 定義データ: 欲しいファイルと、Mcpack内での一般的なファイル名候補のマッピング
+    // ※ ユーザーの要望に合わせてリスト化
+    const TARGETS = {
+        blocks: [
+            { name: "dirt.png", sources: ["dirt.png"] },
+            { name: "grass_side.png", sources: ["grass_side.png", "grass_block_side.png"] },
+            { name: "stone_andesite.png", sources: ["stone_andesite.png", "andesite.png"] },
+            { name: "planks_oak.png", sources: ["planks_oak.png", "wood_planks_oak.png"] },
+            { name: "end_stone.png", sources: ["end_stone.png"] },
+            { name: "deepslate.png", sources: ["deepslate.png", "deepslate_side.png"] },
+            // 羊毛 (赤,青,黄,緑,マゼンタ,水色,灰色,オレンジ)
+            { name: "wool_colored_red.png", sources: ["wool_colored_red.png"] },
+            { name: "wool_colored_blue.png", sources: ["wool_colored_blue.png"] },
+            { name: "wool_colored_yellow.png", sources: ["wool_colored_yellow.png"] },
+            { name: "wool_colored_green.png", sources: ["wool_colored_green.png", "wool_colored_lime.png"] }, // 緑系含む
+            { name: "wool_colored_magenta.png", sources: ["wool_colored_magenta.png"] },
+            { name: "wool_colored_light_blue.png", sources: ["wool_colored_light_blue.png"] },
+            { name: "wool_colored_gray.png", sources: ["wool_colored_gray.png"] },
+            { name: "wool_colored_orange.png", sources: ["wool_colored_orange.png"] }
+        ],
+        items: [
+            // 剣
+            { name: "stone_sword.png", sources: ["stone_sword.png"] },
+            { name: "iron_sword.png", sources: ["iron_sword.png"] },
+            { name: "golden_sword.png", sources: ["golden_sword.png", "gold_sword.png"] },
+            { name: "diamond_sword.png", sources: ["diamond_sword.png"] },
+            // ツルハシ
+            { name: "iron_pickaxe.png", sources: ["iron_pickaxe.png"] },
+            { name: "golden_pickaxe.png", sources: ["golden_pickaxe.png", "gold_pickaxe.png"] },
+            { name: "diamond_pickaxe.png", sources: ["diamond_pickaxe.png"] },
+            // 斧 (各素材) - 代表的なものをピックアップ
+            { name: "wood_axe.png", sources: ["wood_axe.png", "wooden_axe.png"] },
+            { name: "stone_axe.png", sources: ["stone_axe.png"] },
+            { name: "iron_axe.png", sources: ["iron_axe.png"] },
+            { name: "golden_axe.png", sources: ["golden_axe.png", "gold_axe.png"] },
+            { name: "diamond_axe.png", sources: ["diamond_axe.png"] },
+            { name: "netherite_axe.png", sources: ["netherite_axe.png"] },
+            // その他アイテム
+            { name: "ender_pearl.png", sources: ["ender_pearl.png"] },
+            { name: "snowball.png", sources: ["snowball.png"] },
+            // 弓
+            { name: "bow_standby.png", sources: ["bow_standby.png"] },
+            { name: "bow_pulling_2.png", sources: ["bow_pulling_2.png", "bow_pulling_3.png"] }, // 最大引き
+            // 防具 (アイテムアイコンとして処理)
+            // 皮
+            { name: "leather_helmet.png", sources: ["leather_helmet.png"] },
+            { name: "leather_chestplate.png", sources: ["leather_chestplate.png"] },
+            { name: "leather_leggings.png", sources: ["leather_leggings.png"] },
+            { name: "leather_boots.png", sources: ["leather_boots.png"] },
+            // チェーン
+            { name: "chainmail_helmet.png", sources: ["chainmail_helmet.png"] },
+            { name: "chainmail_chestplate.png", sources: ["chainmail_chestplate.png"] },
+            { name: "chainmail_leggings.png", sources: ["chainmail_leggings.png"] },
+            { name: "chainmail_boots.png", sources: ["chainmail_boots.png"] },
+            // 鉄
+            { name: "iron_helmet.png", sources: ["iron_helmet.png"] },
+            { name: "iron_chestplate.png", sources: ["iron_chestplate.png"] },
+            { name: "iron_leggings.png", sources: ["iron_leggings.png"] },
+            { name: "iron_boots.png", sources: ["iron_boots.png"] },
+            // 金
+            { name: "golden_helmet.png", sources: ["golden_helmet.png", "gold_helmet.png"] },
+            { name: "golden_chestplate.png", sources: ["golden_chestplate.png", "gold_chestplate.png"] },
+            { name: "golden_leggings.png", sources: ["golden_leggings.png", "gold_leggings.png"] },
+            { name: "golden_boots.png", sources: ["golden_boots.png", "gold_boots.png"] },
+            // ダイヤ
+            { name: "diamond_helmet.png", sources: ["diamond_helmet.png"] },
+            { name: "diamond_chestplate.png", sources: ["diamond_chestplate.png"] },
+            { name: "diamond_leggings.png", sources: ["diamond_leggings.png"] },
+            { name: "diamond_boots.png", sources: ["diamond_boots.png"] }
+        ],
+        ui: [
+            // UI要素は通常スプライトシート(icons.png)になっているため、ファイルを丸ごとコピーします
+            { name: "icons.png", sources: ["icons.png"] }, 
+            // 経験値バーなどはGUIフォルダにある場合も
+            { name: "ping_green.png", sources: ["ping_green.png"] } // 例として追加。基本はicons.pngに含まれます
+        ]
+    };
+
+    const fileInput = document.getElementById('fileInput');
+    const statusDiv = document.getElementById('status');
+    const logDiv = document.getElementById('log');
+    const downloadBtn = document.getElementById('downloadBtn');
+
+    function log(msg) {
+        logDiv.textContent += msg + "\n";
+        logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    fileInput.addEventListener('change', async function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        statusDiv.textContent = "ファイルを読み込み中...";
+        logDiv.textContent = "";
+        downloadBtn.style.display = 'none';
+
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            const srcZip = await JSZip.loadAsync(arrayBuffer);
+            const dstZip = new JSZip();
+
+            let foundCount = 0;
+
+            // 各カテゴリに対して処理
+            for (const category of ['blocks', 'items', 'ui']) {
+                const rules = TARGETS[category];
+                // 検索するパスのプレフィックス (textures/blocks/など)
+                const searchPrefixes = [
+                    `textures/${category}/`,
+                    `${category}/`, // 一部のパック用
+                    (category === 'ui') ? 'textures/gui/' : 'dummy/' // UIはguiフォルダの場合もある
+                ];
+
+                for (const rule of rules) {
+                    let fileFound = false;
+                    
+                    // ソース候補ファイル名ごとに検索
+                    for (const srcName of rule.sources) {
+                        if(fileFound) break;
+
+                        // プレフィックスと組み合わせて検索
+                        for (const prefix of searchPrefixes) {
+                            const path = prefix + srcName;
+                            // 完全一致で検索
+                            // 注意: Zip内のファイルパスは大文字小文字を区別する場合があるため、
+                            // 本来は正規表現で全走査すべきですが、パフォーマンスのため一旦パス指定で試行
+                            // JSZipはパス指定で取得可能
+                            
+                            // より確実にするため、Zip内の全ファイルを走査してファイル名が一致するものを探すアプローチを取ります
+                            // これによりディレクトリ構造の微妙な違いを吸収します
+                        }
+                    }
+                }
+            }
+            
+            // 全ファイル走査アプローチ（より確実）
+            log("Zip内のファイルを解析中...");
+            const files = Object.keys(srcZip.files);
+            
+            for (const category of ['blocks', 'items', 'ui']) {
+                const rules = TARGETS[category];
+                
+                for (const rule of rules) {
+                    let targetFile = null;
+                    
+                    // ルールのソース名いずれかに一致するファイルをZip内から探す
+                    // ただし、フォルダパスが正しいことをある程度担保する（textures/blocks/dirt.pngなどを優先）
+                    for (const srcName of rule.sources) {
+                        // Zip内の全ファイルパスに対してチェック
+                        for (const fullPath of files) {
+                            if (srcZip.files[fullPath].dir) continue;
+                            
+                            const lowerPath = fullPath.toLowerCase();
+                            
+                            // 条件: ファイル名が一致 かつ カテゴリっぽいパスを含んでいる
+                            // UIの場合は gui または ui
+                            let pathCondition = false;
+                            if (category === 'blocks') pathCondition = lowerPath.includes('blocks/');
+                            if (category === 'items') pathCondition = lowerPath.includes('items/');
+                            if (category === 'ui') pathCondition = lowerPath.includes('ui/') || lowerPath.includes('gui/');
+
+                            if (lowerPath.endsWith(srcName) && pathCondition) {
+                                targetFile = fullPath;
+                                break;
+                            }
+                        }
+                        if (targetFile) break;
+                    }
+
+                    if (targetFile) {
+                        const content = await srcZip.file(targetFile).async("blob");
+                        // 出力用Zipに追加
+                        dstZip.folder(category).file(rule.name, content);
+                        log(`[OK] ${category}/${rule.name} を発見: ${targetFile}`);
+                        foundCount++;
+                    } else {
+                        log(`[MISSING] ${category}/${rule.name} が見つかりませんでした`);
+                    }
+                }
+            }
+
+            if (foundCount === 0) {
+                statusDiv.textContent = "該当するテクスチャが見つかりませんでした。一般的な構造のMcpackですか？";
+                return;
+            }
+
+            // Zip生成
+            statusDiv.textContent = "Zipファイルを生成中...";
+            const blob = await dstZip.generateAsync({type:"blob"});
+            
+            // ダウンロードリンク作成
+            const url = URL.createObjectURL(blob);
+            downloadBtn.href = url;
+            downloadBtn.download = "extracted_textures.zip";
+            downloadBtn.style.display = "inline-block";
+            statusDiv.textContent = `完了！ ${foundCount} 個のファイルを抽出しました。`;
+
+        } catch (e) {
+            console.error(e);
+            statusDiv.textContent = "エラーが発生しました: " + e.message;
+            log(e.stack);
+        }
+    });
+</script>
+
+</body>
+</html>
