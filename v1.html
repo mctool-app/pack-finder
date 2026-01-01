@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minecraft Pack Finder</title>
+    
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.css" rel="stylesheet">
+    
+    <style>
+        :root { --mc-bg: #1e1e1e; --mc-card: #2d2d2d; --mc-accent: #3b8526; }
+        body { background-color: var(--mc-bg); color: #f0f0f0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .drop-zone { border: 2px dashed #666; border-radius: 10px; padding: 30px; text-align: center; cursor: pointer; transition: 0.3s; }
+        .drop-zone:hover { border-color: var(--mc-accent); background-color: #252525; }
+        .preview-img { max-width: 100%; max-height: 400px; display: block; margin: 0 auto; }
+        .crop-container { max-height: 500px; background: #000; }
+        .selection-item { background: var(--mc-card); border-radius: 8px; padding: 10px; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; }
+        .selection-thumb { width: 50px; height: 50px; object-fit: contain; background: #555; margin-right: 10px; }
+        .result-card { background: var(--mc-card); border: 1px solid #444; border-radius: 8px; transition: 0.2s; }
+        .result-card:hover { transform: translateY(-5px); border-color: var(--mc-accent); }
+        .pack-preview-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-top: 10px; }
+        .pack-preview-item { width: 100%; aspect-ratio: 1; object-fit: contain; background: #00000050; border-radius: 4px; }
+        .copy-btn { cursor: pointer; color: #aaa; font-size: 0.9em; }
+        .copy-btn:hover { color: #fff; }
+        /* ローディングオーバーレイ */
+        #loadingOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 9999; display: none; flex-direction: column; justify-content: center; align-items: center; }
+    </style>
+</head>
+<body>
+
+<div class="container py-4">
+    <h1 class="text-center mb-4">Minecraft Pack Finder <span class="badge bg-success">AI</span></h1>
+    <p class="text-center text-muted">スクショからテクスチャパックを特定・検索します</p>
+
+    <div class="card bg-dark mb-4">
+        <div class="card-header">1. スクリーンショットをアップロード</div>
+        <div class="card-body">
+            <div class="drop-zone" id="dropZone">
+                <p class="mb-0">画像をここにドラッグ&ドロップ、またはクリックして選択</p>
+                <input type="file" id="fileInput" multiple accept="image/*" hidden>
+            </div>
+        </div>
+    </div>
+
+    <div class="row" id="workspace" style="display:none;">
+        <div class="col-lg-8 mb-4">
+            <div class="card bg-dark">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>2. エリアを選択 (クロップ)</span>
+                    <button class="btn btn-sm btn-primary" id="btnAddCrop">選択範囲を追加</button>
+                </div>
+                <div class="card-body p-0 crop-container">
+                    <img id="editorImage" src="">
+                </div>
+                <div class="card-footer">
+                    <label class="form-label">選択中の画像の種別:</label>
+                    <select class="form-select bg-secondary text-white" id="itemType">
+                        <option value="diamond_sword">ダイヤモンドの剣 (Items)</option>
+                        <option value="iron_sword">鉄の剣 (Items)</option>
+                        <option value="bow_standby">弓 (Items)</option>
+                        <option value="diamond_pickaxe">ダイヤツルハシ (Items)</option>
+                        <option value="ender_pearl">エンダーパール (Items)</option>
+                        <option value="stone">石 (Blocks)</option>
+                        <option value="grass_block_side">草ブロック側面 (Blocks)</option>
+                        <option value="dirt">土 (Blocks)</option>
+                        <option value="oak_log">オークの原木 (Blocks)</option>
+                        <option value="cobblestone">丸石 (Blocks)</option>
+                        <option value="sand">砂 (Blocks)</option>
+                        <option value="wool_colored_red">赤色の羊毛 (Blocks)</option>
+                        </select>
+                    <small class="text-muted">※斜めのブロックは中心部分を切り抜くと認識率が上がります</small>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-4">
+            <div class="card bg-dark h-100">
+                <div class="card-header">検索対象リスト</div>
+                <div class="card-body" id="selectionList">
+                    <p class="text-muted text-center" id="emptyMsg">まだ選択されていません</p>
+                </div>
+                <div class="card-footer">
+                    <button class="btn btn-success w-100 py-2" id="btnSearch" disabled>
+                        AI検索開始
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="resultsArea" class="mt-5" style="display:none;">
+        <h3>検索結果</h3>
+        <hr>
+        <div class="row" id="resultGrid"></div>
+    </div>
+</div>
+
+<canvas id="cropCanvas" style="display:none;"></canvas>
+
+<div id="loadingOverlay">
+    <div class="spinner-border text-success" style="width: 3rem; height: 3rem;" role="status"></div>
+    <h4 class="mt-3 text-white">AI解析中...</h4>
+    <p class="text-white-50" id="loadingText">モデルをロードしています...</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.0/dist/mobilenet.min.js"></script>
+
+<script>
+    // --- Configuration ---
+    // マッピング: ユーザーの選択肢と内部のテクスチャパス(統合版/Java版の代表的なパス)
+    // 検索ヒット率を上げるため、複数のパス候補を持たせます
+    const TEXTURE_MAP = {
+        'diamond_sword': ['textures/items/diamond_sword.png', 'assets/minecraft/textures/item/diamond_sword.png'],
+        'iron_sword': ['textures/items/iron_sword.png', 'assets/minecraft/textures/item/iron_sword.png'],
+        'bow_standby': ['textures/items/bow_standby.png', 'assets/minecraft/textures/item/bow_standby.png'],
+        'diamond_pickaxe': ['textures/items/diamond_pickaxe.png', 'assets/minecraft/textures/item/diamond_pickaxe.png'],
+        'ender_pearl': ['textures/items/ender_pearl.png', 'assets/minecraft/textures/item/ender_pearl.png'],
+        'stone': ['textures/blocks/stone.png', 'assets/minecraft/textures/block/stone.png'],
+        'grass_block_side': ['textures/blocks/grass_side.png', 'assets/minecraft/textures/block/grass_block_side.png'],
+        'dirt': ['textures/blocks/dirt.png', 'assets/minecraft/textures/block/dirt.png'],
+        'oak_log': ['textures/blocks/log_oak.png', 'assets/minecraft/textures/block/oak_log.png'],
+        'cobblestone': ['textures/blocks/cobblestone.png', 'assets/minecraft/textures/block/cobblestone.png'],
+        'sand': ['textures/blocks/sand.png', 'assets/minecraft/textures/block/sand.png'],
+        'wool_colored_red': ['textures/blocks/wool_colored_red.png', 'assets/minecraft/textures/block/red_wool.png']
+    };
+
+    // --- State Variables ---
+    let cropper;
+    let currentFileIndex = 0;
+    let uploadedFiles = [];
+    let selections = []; // { type: 'stone', dataUrl: '...', tensor: obj }
+    let net = null; // AI Model
+
+    // --- Initialization ---
+    document.addEventListener('DOMContentLoaded', async () => {
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        const loadingText = document.getElementById('loadingText');
+        
+        // Load AI Model silently
+        try {
+            console.log("Loading TensorFlow MobileNet...");
+            net = await mobilenet.load();
+            console.log("Model loaded.");
+        } catch (e) {
+            console.error("AI Model Load Failed:", e);
+            alert("AIモデルの読み込みに失敗しました。ページを更新してください。");
+        }
+
+        // Setup Drag & Drop
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.style.borderColor = '#fff'; });
+        dropZone.addEventListener('dragleave', (e) => { e.preventDefault(); dropZone.style.borderColor = '#666'; });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#666';
+            handleFiles(e.dataTransfer.files);
+        });
+        fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+
+        document.getElementById('btnAddCrop').addEventListener('click', addCropSelection);
+        document.getElementById('btnSearch').addEventListener('click', startSearch);
+    });
+
+    // --- File Handling ---
+    function handleFiles(files) {
+        if (!files.length) return;
+        uploadedFiles = Array.from(files);
+        currentFileIndex = 0;
+        loadImageForCropping(uploadedFiles[0]);
+        document.getElementById('workspace').style.display = 'flex';
+    }
+
+    function loadImageForCropping(file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const img = document.getElementById('editorImage');
+            img.src = e.target.result;
+            
+            if (cropper) cropper.destroy();
+            
+            img.onload = () => {
+                cropper = new Cropper(img, {
+                    viewMode: 1,
+                    autoCropArea: 0.2,
+                    zoomable: true
+                });
+            };
+        };
+        reader.readAsDataURL(file);
+    }
+
+    // --- Cropping & Selection ---
+    async function addCropSelection() {
+        if (!cropper) return;
+
+        const canvas = cropper.getCroppedCanvas();
+        if (!canvas) return;
+
+        // Resize for performance and normalization (64x64 is enough for features)
+        const resizedCanvas = document.createElement('canvas');
+        resizedCanvas.width = 64;
+        resizedCanvas.height = 64;
+        const ctx = resizedCanvas.getContext('2d');
+        ctx.drawImage(canvas, 0, 0, 64, 64);
+
+        const dataUrl = resizedCanvas.toDataURL('image/png');
+        const type = document.getElementById('itemType').value;
+        const typeName = document.getElementById('itemType').options[document.getElementById('itemType').selectedIndex].text;
+
+        // Feature Extraction (AI)
+        const tensor = tf.browser.fromPixels(resizedCanvas);
+        // Normalize tensor
+        const features = await net.infer(tensor, 'conv_preds'); // Internal layer for features
+        
+        selections.push({
+            id: Date.now(),
+            type: type,
+            typeName: typeName,
+            dataUrl: dataUrl,
+            features: features // Save tensor features
+        });
+
+        renderSelectionList();
+        document.getElementById('btnSearch').disabled = false;
+        
+        // Clean up tensor memory immediately if possible, but we need it for search. 
+        // Note: In a large app, we should manage memory better.
+    }
+
+    function renderSelectionList() {
+        const list = document.getElementById('selectionList');
+        const emptyMsg = document.getElementById('emptyMsg');
+        if (emptyMsg) emptyMsg.style.display = 'none';
+
+        list.innerHTML = '';
+        selections.forEach((sel, index) => {
+            const div = document.createElement('div');
+            div.className = 'selection-item';
+            div.innerHTML = `
+                <div class="d-flex align-items-center">
+                    <img src="${sel.dataUrl}" class="selection-thumb">
+                    <span>${sel.typeName}</span>
+                </div>
+                <button class="btn btn-sm btn-outline-danger" onclick="removeSelection(${index})">×</button>
+            `;
+            list.appendChild(div);
+        });
+    }
+
+    window.removeSelection = function(index) {
+        selections.splice(index, 1);
+        renderSelectionList();
+        if (selections.length === 0) document.getElementById('btnSearch').disabled = true;
+    };
+
+    // --- Search Logic ---
+    async function startSearch() {
+        const loading = document.getElementById('loadingOverlay');
+        const loadingText = document.getElementById('loadingText');
+        loading.style.display = 'flex';
+        const resultsArea = document.getElementById('resultsArea');
+        const resultGrid = document.getElementById('resultGrid');
+        resultGrid.innerHTML = '';
+        resultsArea.style.display = 'none';
+
+        try {
+            // 1. Get Pack List
+            loadingText.innerText = "パックリストを取得中...";
+            const response = await fetch('pack_list.txt');
+            if (!response.ok) throw new Error("pack_list.txtが見つかりません");
+            const text = await response.text();
+            const packs = text.split(',').map(s => s.trim()).filter(s => s.length > 0);
+
+            let results = [];
+
+            // 2. Iterate Packs
+            for (let i = 0; i < packs.length; i++) {
+                const packName = packs[i];
+                loadingText.innerText = `解析中: ${packName} (${i+1}/${packs.length})`;
+                
+                try {
+                    const packScore = await analyzePack(packName);
+                    if (packScore !== null) {
+                        results.push(packScore);
+                    }
+                } catch (err) {
+                    console.warn(`パック読み込みエラー: ${packName}`, err);
+                }
+            }
+
+            // 3. Sort & Display
+            results.sort((a, b) => b.score - a.score);
+            
+            results.forEach(res => {
+                const col = document.createElement('div');
+                col.className = 'col-md-6 col-lg-4 mb-4';
+                col.innerHTML = `
+                    <div class="result-card p-3 h-100">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h5 class="mb-0 text-truncate" title="${res.name}">${res.name}</h5>
+                            <span class="badge bg-primary">${Math.round(res.score * 100)}% 一致</span>
+                        </div>
+                        <div class="pack-preview-grid">
+                            ${res.previews.map(url => `<img src="${url}" class="pack-preview-item">`).join('')}
+                        </div>
+                        <div class="mt-3 text-end">
+                             <span class="copy-btn" onclick="navigator.clipboard.writeText('${res.name}');alert('コピーしました: ${res.name}')">
+                                📋 名前をコピー
+                            </span>
+                        </div>
+                    </div>
+                `;
+                resultGrid.appendChild(col);
+            });
+
+            resultsArea.style.display = 'block';
+
+        } catch (e) {
+            alert("エラーが発生しました: " + e.message);
+            console.error(e);
+        } finally {
+            loading.style.display = 'none';
+        }
+    }
+
+    async function analyzePack(packName) {
+        // Fetch Zip
+        const zipResp = await fetch(`packs/${packName}.zip`);
+        if (!zipResp.ok) return null;
+        const blob = await zipResp.blob();
+        const zip = await JSZip.loadAsync(blob);
+
+        let totalSimilarity = 0;
+        let matchCount = 0;
+        let previews = [];
+
+        // 比較処理
+        for (const sel of selections) {
+            const possiblePaths = TEXTURE_MAP[sel.type];
+            let bestFile = null;
+
+            // Zip内を検索
+            for (const path of possiblePaths) {
+                // 大文字小文字を無視して検索する簡易ロジック
+                // JSZipは正確なパスが必要だが、正規表現検索も可能
+                const file = zip.file(new RegExp(path.replace('/', '\\/'), "i"))[0];
+                if (file) {
+                    bestFile = file;
+                    break;
+                }
+            }
+
+            if (bestFile) {
+                // 画像をBlobとして読み込む
+                const imgBlob = await bestFile.async('blob');
+                const imgBitmap = await createImageBitmap(imgBlob);
+                
+                // Tensor化 (AI比較用)
+                const canvas = document.createElement('canvas');
+                canvas.width = 64;
+                canvas.height = 64;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(imgBitmap, 0, 0, 64, 64);
+                
+                const packTensor = tf.browser.fromPixels(canvas);
+                const packFeatures = await net.infer(packTensor, 'conv_preds');
+
+                // コサイン類似度を計算 (Cosine Similarity)
+                const similarity = cosineSimilarity(sel.features, packFeatures);
+                
+                totalSimilarity += similarity;
+                matchCount++;
+                
+                // プレビュー用に保存 (最初の4つだけ)
+                if (previews.length < 4) {
+                    previews.push(canvas.toDataURL());
+                }
+
+                // Memory cleanup
+                packTensor.dispose();
+                // packFeatures is managed by TF logic, but infer returns a tensor, so dispose it
+                // Note: infer returns a Tensor.
+                if(packFeatures) packFeatures.dispose();
+            }
+        }
+
+        if (matchCount === 0) return { name: packName, score: 0, previews: [] };
+
+        // 平均スコア (0.0 - 1.0)
+        return {
+            name: packName,
+            score: totalSimilarity / matchCount,
+            previews: previews
+        };
+    }
+
+    // --- Math Utils ---
+    function cosineSimilarity(tensorA, tensorB) {
+        // TF.jsでのコサイン類似度計算
+        // A . B / (|A| * |B|)
+        const dotProduct = tf.sum(tf.mul(tensorA, tensorB));
+        const normA = tf.norm(tensorA);
+        const normB = tf.norm(tensorB);
+        const similarity = tf.div(dotProduct, tf.mul(normA, normB));
+        
+        const score = similarity.dataSync()[0];
+        
+        // Clean up temp tensors created during calculation
+        dotProduct.dispose();
+        normA.dispose();
+        normB.dispose();
+        similarity.dispose();
+
+        return score;
+    }
+
+</script>
+</body>
+</html>
