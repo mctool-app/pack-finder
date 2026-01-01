@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced MC Texture Finder</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <style>
+        :root { --bg-color: #121212; --card-bg: #1e1e1e; --accent: #4caf50; --border: #333; }
+        body { background-color: var(--bg-color); color: #e0e0e0; font-family: 'Segoe UI', sans-serif; }
+        
+        /* 共通UI */
+        .card { background-color: var(--card-bg); border: 1px solid var(--border); }
+        .btn-primary { background-color: var(--accent); border: none; }
+        .btn-primary:hover { background-color: #43a047; }
+        
+        /* エディタエリア */
+        .editor-container { position: relative; overflow: hidden; background: #000; touch-action: none; user-select: none; }
+        #canvasOverlay { position: absolute; top: 0; left: 0; cursor: crosshair; }
+        
+        /* ドラッグ&ドロップ */
+        .drop-zone { border: 2px dashed #555; border-radius: 8px; padding: 40px; text-align: center; transition: 0.3s; cursor: pointer; }
+        .drop-zone:hover { border-color: var(--accent); background: #1a1a1a; }
+
+        /* 結果表示 */
+        .result-card { transition: transform 0.2s; height: 100%; }
+        .result-card:hover { transform: translateY(-3px); border-color: var(--accent); }
+        .pack-img-preview { width: 48px; height: 48px; image-rendering: pixelated; object-fit: contain; background: #333; border-radius: 4px; margin: 2px; }
+        
+        /* ローディング */
+        #loadingOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 9999; display: none; flex-direction: column; justify-content: center; align-items: center; }
+    </style>
+</head>
+<body>
+
+<div class="container py-4">
+    <h2 class="text-center mb-4">MC Texture Finder <span class="text-success">Pro</span></h2>
+
+    <div class="card mb-4">
+        <div class="card-header">1. スクリーンショットをアップロード</div>
+        <div class="card-body">
+            <div class="drop-zone" id="dropZone">
+                <h4 class="h6">画像をドラッグ&ドロップ または クリック</h4>
+                <input type="file" id="fileInput" multiple accept="image/*" hidden>
+            </div>
+        </div>
+    </div>
+
+    <div class="row" id="workspace" style="display:none;">
+        <div class="col-lg-8 mb-3">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>2. 4点を指定して変形クロップ</span>
+                    <button class="btn btn-sm btn-primary" id="btnAddSelection">リストに追加</button>
+                </div>
+                <div class="card-body p-0 d-flex justify-content-center bg-dark">
+                    <div class="editor-container" id="editorContainer">
+                        <canvas id="sourceCanvas"></canvas>
+                        <canvas id="canvasOverlay"></canvas>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <select class="form-select bg-secondary text-white border-0" id="itemType">
+                                </select>
+                        </div>
+                        <div class="col-md-6 text-end">
+                            <small class="text-muted">四隅の●をドラッグしてブロックの面に合わせると精度が向上します</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-4 mb-3">
+            <div class="card h-100">
+                <div class="card-header">検索対象リスト</div>
+                <div class="card-body overflow-auto" style="max-height: 400px;" id="selectionList">
+                    <p class="text-muted text-center small mt-3">ここに追加されます</p>
+                </div>
+                <div class="card-footer">
+                    <button class="btn btn-success w-100 fw-bold" id="btnSearch" disabled>検索開始 (AI)</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="resultsArea" style="display:none;" class="mt-4">
+        <h4 class="mb-3">検索結果</h4>
+        <div class="row g-3" id="resultGrid"></div>
+    </div>
+</div>
+
+<div id="loadingOverlay">
+    <div class="spinner-border text-success mb-3" role="status"></div>
+    <h5 class="text-white" id="loadingText">AIモデル起動中...</h5>
+    <div class="progress w-50 mt-2" style="height: 5px;">
+        <div class="progress-bar bg-success" id="progressBar" style="width: 0%"></div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.0/dist/mobilenet.min.js"></script>
+
+<script>
+/**
+ * 設定: テクスチャマッピング
+ * 統合版(Bedrock)とJava版の両方のパスを考慮
+ */
+const TEXTURE_DEFINITIONS = {
+    'Blocks': {
+        'stone': ['textures/blocks/stone.png', 'assets/minecraft/textures/block/stone.png'],
+        'dirt': ['textures/blocks/dirt.png', 'assets/minecraft/textures/block/dirt.png'],
+        'grass_side': ['textures/blocks/grass_side.png', 'assets/minecraft/textures/block/grass_block_side.png'],
+        'cobblestone': ['textures/blocks/cobblestone.png', 'assets/minecraft/textures/block/cobblestone.png'],
+        'oak_log': ['textures/blocks/log_oak.png', 'assets/minecraft/textures/block/oak_log.png'],
+        'planks_oak': ['textures/blocks/planks_oak.png', 'assets/minecraft/textures/block/oak_planks.png'],
+        'sand': ['textures/blocks/sand.png', 'assets/minecraft/textures/block/sand.png'],
+        'wool_red': ['textures/blocks/wool_colored_red.png', 'assets/minecraft/textures/block/red_wool.png'],
+        'glass': ['textures/blocks/glass.png', 'assets/minecraft/textures/block/glass.png'],
+        'obsidian': ['textures/blocks/obsidian.png', 'assets/minecraft/textures/block/obsidian.png'],
+        'diamond_ore': ['textures/blocks/diamond_ore.png', 'assets/minecraft/textures/block/diamond_ore.png'],
+    },
+    'Items': {
+        'diamond_sword': ['textures/items/diamond_sword.png', 'assets/minecraft/textures/item/diamond_sword.png'],
+        'iron_sword': ['textures/items/iron_sword.png', 'assets/minecraft/textures/item/iron_sword.png'],
+        'bow_standby': ['textures/items/bow_standby.png', 'assets/minecraft/textures/item/bow_standby.png'],
+        'diamond_pickaxe': ['textures/items/diamond_pickaxe.png', 'assets/minecraft/textures/item/diamond_pickaxe.png'],
+        'ender_pearl': ['textures/items/ender_pearl.png', 'assets/minecraft/textures/item/ender_pearl.png'],
+        'apple': ['textures/items/apple.png', 'assets/minecraft/textures/item/apple.png'],
+        'totem': ['textures/items/totem.png', 'assets/minecraft/textures/item/totem_of_undying.png']
+    },
+    'HUD': {
+        'heart': ['textures/gui/icons.png', 'assets/minecraft/textures/gui/icons.png'] // ※HUDは切り抜きが難しいがリストには入れる
+    }
+};
+
+// グローバル変数
+let net;
+let selections = [];
+let sourceImage = new Image();
+let points = []; // [tl, tr, br, bl]
+const canvasW = 600; // エディタの最大幅
+let scaleFactor = 1;
+
+// DOM要素
+const ui = {
+    dropZone: document.getElementById('dropZone'),
+    fileInput: document.getElementById('fileInput'),
+    workspace: document.getElementById('workspace'),
+    sCanvas: document.getElementById('sourceCanvas'),
+    oCanvas: document.getElementById('canvasOverlay'),
+    itemType: document.getElementById('itemType'),
+    selList: document.getElementById('selectionList'),
+    loading: document.getElementById('loadingOverlay'),
+    loadingText: document.getElementById('loadingText'),
+    bar: document.getElementById('progressBar')
+};
+
+// 初期化
+(async () => {
+    // プルダウン生成
+    for (const [cat, items] of Object.entries(TEXTURE_DEFINITIONS)) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = cat;
+        for (const key of Object.keys(items)) {
+            const opt = document.createElement('option');
+            opt.value = key;
+            opt.innerText = key;
+            optgroup.appendChild(opt);
+        }
+        ui.itemType.appendChild(optgroup);
+    }
+    
+    // AIロード
+    try {
+        console.log('Loading MobileNet...');
+        net = await mobilenet.load();
+        console.log('MobileNet Loaded');
+    } catch(e) {
+        alert('AIモデルの読み込みに失敗しました。');
+    }
+
+    // イベントリスナー
+    ui.dropZone.onclick = () => ui.fileInput.click();
+    ui.dropZone.ondragover = e => { e.preventDefault(); ui.dropZone.style.borderColor = '#fff'; };
+    ui.dropZone.ondragleave = e => { e.preventDefault(); ui.dropZone.style.borderColor = '#555'; };
+    ui.dropZone.ondrop = e => { e.preventDefault(); handleFiles(e.dataTransfer.files); };
+    ui.fileInput.onchange = e => handleFiles(e.target.files);
+    
+    // Canvas操作イベント
+    ui.oCanvas.addEventListener('mousedown', onPointerDown);
+    ui.oCanvas.addEventListener('mousemove', onPointerMove);
+    ui.oCanvas.addEventListener('mouseup', onPointerUp);
+    ui.oCanvas.addEventListener('touchstart', onPointerDown, {passive: false});
+    ui.oCanvas.addEventListener('touchmove', onPointerMove, {passive: false});
+    ui.oCanvas.addEventListener('touchend', onPointerUp);
+
+    document.getElementById('btnAddSelection').onclick = addSelection;
+    document.getElementById('btnSearch').onclick = executeSearch;
+})();
+
+function handleFiles(files) {
+    if (!files.length) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+        sourceImage.src = e.target.result;
+        sourceImage.onload = initEditor;
+    };
+    reader.readAsDataURL(files[0]);
+    ui.workspace.style.display = 'flex';
+}
+
+// --- 画像変形エディタ (Perspective Editor) ---
+
+function initEditor() {
+    const containerW = document.getElementById('editorContainer').clientWidth;
+    // アスペクト比維持でリサイズ
+    scaleFactor = containerW / sourceImage.width;
+    if (scaleFactor > 1) scaleFactor = 1;
+    
+    const w = sourceImage.width * scaleFactor;
+    const h = sourceImage.height * scaleFactor;
+    
+    ui.sCanvas.width = w;
+    ui.sCanvas.height = h;
+    ui.oCanvas.width = w;
+    ui.oCanvas.height = h;
+    
+    const ctx = ui.sCanvas.getContext('2d');
+    ctx.drawImage(sourceImage, 0, 0, w, h);
+    
+    // 初期選択範囲（中央に配置）
+    const pad = w * 0.2;
+    points = [
+        {x: pad, y: pad},         // TL
+        {x: w - pad, y: pad},     // TR
+        {x: w - pad, y: h - pad}, // BR
+        {x: pad, y: h - pad}      // BL
+    ];
+    
+    drawOverlay();
+}
+
+let activePoint = null;
+
+function drawOverlay() {
+    const ctx = ui.oCanvas.getContext('2d');
+    ctx.clearRect(0, 0, ui.oCanvas.width, ui.oCanvas.height);
+    
+    // 線を描画
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    ctx.lineTo(points[1].x, points[1].y);
+    ctx.lineTo(points[2].x, points[2].y);
+    ctx.lineTo(points[3].x, points[3].y);
+    ctx.closePath();
+    ctx.strokeStyle = '#00ff00';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
+    ctx.fill();
+    
+    // 点を描画
+    points.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 8, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+        ctx.strokeStyle = '#000';
+        ctx.stroke();
+    });
+}
+
+function getPointerPos(e) {
+    const rect = ui.oCanvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+}
+
+function onPointerDown(e) {
+    e.preventDefault();
+    const pos = getPointerPos(e);
+    // 一番近い点を探す
+    let minD = 20; // ヒット半径
+    activePoint = null;
+    points.forEach((p, i) => {
+        const d = Math.hypot(p.x - pos.x, p.y - pos.y);
+        if (d < minD) {
+            minD = d;
+            activePoint = i;
+        }
+    });
+}
+
+function onPointerMove(e) {
+    if (activePoint === null) return;
+    e.preventDefault();
+    const pos = getPointerPos(e);
+    // 範囲外チェックは省略(使いやすさ重視)
+    points[activePoint].x = pos.x;
+    points[activePoint].y = pos.y;
+    drawOverlay();
+}
+
+function onPointerUp() {
+    activePoint = null;
+}
+
+// --- 変形ロジック (Homography / Perspective Warp) ---
+
+async function addSelection() {
+    // 1. 変形を実行して正方形(64x64)の画像データを取得
+    const warpedCanvas = document.createElement('canvas');
+    warpedCanvas.width = 64;
+    warpedCanvas.height = 64;
+    const ctx = warpedCanvas.getContext('2d');
+    
+    // ソース画像の元サイズ座標に変換
+    const srcPoints = points.map(p => ({ x: p.x / scaleFactor, y: p.y / scaleFactor }));
+    
+    // 変形実行 (簡易的な実装: 三角形2つに分割して描画する方法もあるが、精度重視でピクセルマッピングを行う)
+    // ここでは重い計算を避けるため、CanvasのsetTransform等ではなく、ピクセル操作で実装するか、
+    // あるいは単純なアフィン変換で近似するか。
+    // 今回は「大幅に斜め」に対応するため、厳密なPerspective Warpを行う。
+    
+    const imgData = warpPerspective(sourceImage, srcPoints, 64, 64);
+    ctx.putImageData(imgData, 0, 0);
+    
+    // 2. 特徴量抽出
+    const tensor = tf.browser.fromPixels(warpedCanvas);
+    const features = await net.infer(tensor, 'conv_preds');
+    
+    // カラーヒストグラム作成
+    const hist = calcColorHistogram(imgData);
+
+    const typeKey = ui.itemType.value;
+    const dataUrl = warpedCanvas.toDataURL();
+    
+    selections.push({
+        type: typeKey,
+        dataUrl: dataUrl,
+        features: features,
+        hist: hist,
+        pixelData: imgData // 完全一致判定用
+    });
+    
+    renderSelectionList();
+    document.getElementById('btnSearch').disabled = false;
+    tensor.dispose();
+}
+
+// ホモグラフィ変換による画像生成 (CPU処理)
+function warpPerspective(image, srcPts, w, h) {
+    // 転送先座標 (0,0), (w,0), (w,h), (0,h)
+    const dstPts = [{x:0, y:0}, {x:w, y:0}, {x:w, y:h}, {x:0, y:h}];
+    
+    // ホモグラフィ行列計算 (H)
+    const H = findHomography(srcPts, dstPts);
+    const H_inv = invertMatrix(H, 3); // 逆変換用に逆行列が必要
+    
+    // 転送用キャンバス(元画像データを取得)
+    const tempC = document.createElement('canvas');
+    tempC.width = image.width;
+    tempC.height = image.height;
+    const tCtx = tempC.getContext('2d');
+    tCtx.drawImage(image, 0, 0);
+    const srcData = tCtx.getImageData(0, 0, image.width, image.height);
+    
+    const res = new ImageData(w, h);
+    
+    // 逆マッピング: 出力画像の各ピクセルについて、元画像のどこに対応するか計算
+    for(let y=0; y<h; y++) {
+        for(let x=0; x<w; x++) {
+            // [x, y, 1] * H_inv
+            const D = H_inv[6]*x + H_inv[7]*y + H_inv[8];
+            const u = (H_inv[0]*x + H_inv[1]*y + H_inv[2]) / D;
+            const v = (H_inv[3]*x + H_inv[4]*y + H_inv[5]) / D;
+            
+            // 最近傍補間 (Nearest Neighbor) - ドット絵には最適
+            const srcX = Math.round(u);
+            const srcY = Math.round(v);
+            
+            const idx = (y * w + x) * 4;
+            
+            if (srcX >= 0 && srcX < srcData.width && srcY >= 0 && srcY < srcData.height) {
+                const srcIdx = (srcY * srcData.width + srcX) * 4;
+                res.data[idx] = srcData.data[srcIdx];
+                res.data[idx+1] = srcData.data[srcIdx+1];
+                res.data[idx+2] = srcData.data[srcIdx+2];
+                res.data[idx+3] = 255;
+            } else {
+                res.data[idx+3] = 0; // 範囲外透明
+            }
+        }
+    }
+    return res;
+}
+
+// 数学ヘルパー: 4点からホモグラフィ行列を求める (Gaussian elimination)
+function findHomography(src, dst) {
+    // 8つの連立方程式を解く (Ah = b)
+    let P = [];
+    for(let i=0; i<4; i++) {
+        let sx = src[i].x, sy = src[i].y;
+        let dx = dst[i].x, dy = dst[i].y;
+        P.push([-sx, -sy, -1,  0,   0,   0, sx*dx, sy*dx]);
+        P.push([ 0,   0,   0, -sx, -sy, -1, sx*dy, sy*dy]);
+    }
+    // 解ベクトル
+    let b = [];
+    for(let i=0; i<4; i++) { b.push(dst[i].x); b.push(dst[i].y); }
+    
+    // Gauss-Jordan elimination
+    const X = solveLinearSystem(P, b);
+    return [X[0], X[1], X[2], X[3], X[4], X[5], X[6], X[7], 1];
+}
+
+function solveLinearSystem(A, b) {
+    // 簡易的なsolver
+    const n = A.length;
+    for(let i=0; i<n; i++) A[i].push(b[i]);
+    for(let i=0; i<n; i++) {
+        let maxRow = i;
+        for(let k=i+1; k<n; k++) if(Math.abs(A[k][i]) > Math.abs(A[maxRow][i])) maxRow = k;
+        [A[i], A[maxRow]] = [A[maxRow], A[i]];
+        for(let k=i+1; k<n; k++) {
+            const f = A[k][i] / A[i][i];
+            for(let j=i; j<=n; j++) A[k][j] -= A[i][j] * f;
+        }
+    }
+    const x = new Array(n);
+    for(let i=n-1; i>=0; i--) {
+        let s = 0;
+        for(let j=i+1; j<n; j++) s += A[i][j] * x[j];
+        x[i] = (A[i][n] - s) / A[i][i];
+    }
+    return x;
+}
+
+function invertMatrix(m, size) {
+    // 3x3行列の逆行列のみ必要
+    if(size !== 3) return m;
+    const n11=m[0], n12=m[1], n13=m[2], n21=m[3], n22=m[4], n23=m[5], n31=m[6], n32=m[7], n33=m[8];
+    const t11 = n33*n22 - n32*n23, t12 = n32*n13 - n33*n12, t13 = n23*n12 - n22*n13;
+    const det = n11*t11 + n21*t12 + n31*t13;
+    if (det === 0) return m;
+    const idet = 1/det;
+    return [
+        t11*idet, (n31*n23 - n33*n21)*idet, (n32*n21 - n31*n22)*idet,
+        t12*idet, (n33*n11 - n31*n13)*idet, (n31*n12 - n32*n11)*idet,
+        t13*idet, (n21*n13 - n23*n11)*idet, (n22*n11 - n21*n12)*idet
+    ];
+}
+
+function renderSelectionList() {
+    ui.selList.innerHTML = '';
+    selections.forEach((sel, i) => {
+        const div = document.createElement('div');
+        div.className = 'd-flex align-items-center mb-2 bg-dark p-2 rounded';
+        div.innerHTML = `
+            <img src="${sel.dataUrl}" class="pack-img-preview me-3">
+            <span class="flex-grow-1">${sel.type}</span>
+            <button class="btn btn-sm btn-outline-danger" onclick="removeSel(${i})">×</button>
+        `;
+        ui.selList.appendChild(div);
+    });
+}
+window.removeSel = (i) => { selections.splice(i,1); renderSelectionList(); };
+
+// --- 検索実行 & 比較ロジック ---
+
+async function executeSearch() {
+    ui.loading.style.display = 'flex';
+    document.getElementById('resultsArea').style.display = 'none';
+    const grid = document.getElementById('resultGrid');
+    grid.innerHTML = '';
+
+    try {
+        // 1. パックリスト取得
+        ui.loadingText.innerText = "パック一覧を取得中...";
+        const listResp = await fetch('pack_list.txt');
+        if (!listResp.ok) throw new Error("pack_list.txt not found");
+        const packNames = (await listResp.text()).split(',').map(s=>s.trim()).filter(s=>s);
+        
+        let results = [];
+        let doneCount = 0;
+
+        // 2. パックごとに並行ではなく、順次処理 (ブラウザ負荷軽減のため)
+        // ※高速化のため、TextureごとにPromise.allしてもよいが、ここでは確実に
+        for (const packName of packNames) {
+            ui.loadingText.innerText = `解析中: ${packName}`;
+            ui.bar.style.width = `${(doneCount/packNames.length)*100}%`;
+            
+            const scoreData = await matchPack(packName);
+            if (scoreData.score > 0) results.push(scoreData);
+            
+            doneCount++;
+        }
+
+        // 3. ソートと表示
+        results.sort((a,b) => b.score - a.score);
+        
+        results.forEach(res => {
+            const percent = Math.round(res.score * 100);
+            const col = document.createElement('div');
+            col.className = 'col-md-6 col-lg-4';
+            col.innerHTML = `
+                <div class="card result-card p-3">
+                    <div class="d-flex justify-content-between">
+                        <h5 class="text-truncate" title="${res.name}">${res.name}</h5>
+                        <span class="badge ${percent>80?'bg-success':(percent>50?'bg-warning':'bg-secondary')}">${percent}%</span>
+                    </div>
+                    <div class="d-flex flex-wrap mt-2">
+                        ${res.previews.map(url => `<img src="${url}" class="pack-img-preview">`).join('')}
+                    </div>
+                    <button class="btn btn-sm btn-outline-light mt-2 w-100" onclick="copyName('${res.name}')">名前をコピー</button>
+                </div>
+            `;
+            grid.appendChild(col);
+        });
+        
+        document.getElementById('resultsArea').style.display = 'block';
+
+    } catch (e) {
+        alert("Error: " + e.message);
+        console.error(e);
+    } finally {
+        ui.loading.style.display = 'none';
+    }
+}
+
+async function matchPack(packName) {
+    let totalScore = 0;
+    let matchCount = 0;
+    let previews = [];
+    
+    // セレクションごとに比較
+    for (const sel of selections) {
+        // 統合版/Java版のパス候補を順番にfetchして探す
+        const paths = findPathsForType(sel.type);
+        let imgBlob = null;
+        
+        for (const path of paths) {
+            // ここでURL構築。セキュリティ回避のため相対パスを使用。
+            // 外部サーバーならここでProxyを挟む: `https://proxy.example.com/${targetUrl}`
+            const url = `packs/${packName}/${path}`;
+            try {
+                const resp = await fetch(url);
+                if (resp.ok) {
+                    imgBlob = await resp.blob();
+                    break;
+                }
+            } catch(e) {}
+        }
+
+        if (imgBlob) {
+            // AI比較
+            const img = await createImageBitmap(imgBlob);
+            
+            // Canvas化
+            const cvs = document.createElement('canvas');
+            cvs.width = 64; cvs.height = 64;
+            const ctx = cvs.getContext('2d');
+            ctx.drawImage(img, 0, 0, 64, 64);
+            const imgData = ctx.getImageData(0,0,64,64);
+            
+            // 1. MobileNet 特徴量
+            const tensor = tf.browser.fromPixels(cvs);
+            const features = await net.infer(tensor, 'conv_preds');
+            const aiScore = cosineSim(sel.features, features);
+            
+            // 2. ヒストグラム (色の一致度)
+            const packHist = calcColorHistogram(imgData);
+            const colorScore = compareHist(sel.hist, packHist);
+
+            // 3. 総合スコア (AI 60% + 色 40%)
+            // ドット絵は色が重要なので色の比重を高めに設定
+            const finalScore = (aiScore * 0.6) + (colorScore * 0.4);
+            
+            totalScore += finalScore;
+            matchCount++;
+            previews.push(cvs.toDataURL());
+            
+            tensor.dispose();
+            features.dispose(); // inferの結果はtensorなので解放必要
+        }
+    }
+    
+    return {
+        name: packName,
+        score: matchCount > 0 ? totalScore / matchCount : 0,
+        previews: previews.slice(0, 5)
+    };
+}
+
+// パス定義から候補配列を取得
+function findPathsForType(type) {
+    for (const cat in TEXTURE_DEFINITIONS) {
+        if (TEXTURE_DEFINITIONS[cat][type]) return TEXTURE_DEFINITIONS[cat][type];
+    }
+    return [];
+}
+
+// ヘルパー: コサイン類似度
+function cosineSim(tA, tB) {
+    const dot = tf.sum(tf.mul(tA, tB));
+    const nA = tf.norm(tA);
+    const nB = tf.norm(tB);
+    const val = tf.div(dot, tf.mul(nA, nB)).dataSync()[0];
+    dot.dispose(); nA.dispose(); nB.dispose();
+    return val;
+}
+
+// ヘルパー: カラーヒストグラム計算 (R,G,B 各4bin = 64次元)
+function calcColorHistogram(imgData) {
+    const bins = new Array(64).fill(0);
+    const data = imgData.data;
+    let total = 0;
+    for(let i=0; i<data.length; i+=4) {
+        if(data[i+3] < 128) continue; // 透明は無視
+        const r = Math.floor(data[i] / 64);
+        const g = Math.floor(data[i+1] / 64);
+        const b = Math.floor(data[i+2] / 64);
+        const idx = r * 16 + g * 4 + b;
+        bins[idx]++;
+        total++;
+    }
+    return bins.map(v => total ? v/total : 0);
+}
+
+// ヘルパー: ヒストグラム比較 (Bhattacharyya distance的なIntersection)
+function compareHist(h1, h2) {
+    let sum = 0;
+    for(let i=0; i<h1.length; i++) {
+        sum += Math.min(h1[i], h2[i]);
+    }
+    return sum; // 0.0 - 1.0 (1.0 = 完全一致)
+}
+
+function copyName(txt) {
+    navigator.clipboard.writeText(txt);
+    alert('コピーしました: ' + txt);
+}
+
+</script>
+</body>
+</html>
